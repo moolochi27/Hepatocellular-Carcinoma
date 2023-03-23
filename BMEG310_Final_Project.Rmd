@@ -1,0 +1,592 @@
+---
+title: "BMEG310 Final Project"
+author: "Groupo 16"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    df_print: paged
+---
+
+Setup
+```{r setup, warning=FALSE,message=FALSE}
+#load libraries
+library(ggplot2)
+library(pheatmap)
+library(DESeq2)
+library(ggbiplot)
+library(matrixStats)
+library("AnnotationDbi")
+library("org.Hs.eg.db")
+library(pathview)
+library(gage)
+library(gageData)
+library("survival")
+library("survminer")
+
+#Import and preprocess data
+rna_seq = read.csv("RNAseq.csv", row.names=1) 
+clinical_patient = read.delim("data_clinical_patient.txt")
+mutations = read.delim("data_mutations.txt")
+```
+
+Data Processing
+```{r, warning=FALSE, message=FALSE}
+#Preprocess data
+#Filter data where there is only 0 or a read count across all samples
+rna_seq <- rna_seq[rowSums(rna_seq)>1,]
+RNAseq <- rna_seq
+
+#For some reason, there's some RNA_seq samples not associated with any patient data. we remove these:
+RNAseq = RNAseq[,which(substr(colnames(RNAseq),1,12) %in% 
+        gsub("-",".",clinical_patient$X.Patient.Identifier[-c(1,2,3,4)]))]
+```
+
+Data Exploration
+```{r, warning=FALSE, message=FALSE}
+#Looking at possible factors that may have differences in gene expression
+colnames(clinical_patient)
+
+#Looking at sex
+table(clinical_patient$Sex)
+
+#looking at tumor stage
+table(clinical_patient$Neoplasm.Disease.Stage.American.Joint.Committee.on.Cancer.Code)
+
+#looking at tumor vs tumor free
+table(clinical_patient$Person.Neoplasm.Cancer.Status)
+```
+
+Analysis on patient features such as sex
+```{r, warning=FALSE, message=FALSE}
+countData <- rna_seq
+
+#create conditions
+temp = data.frame(sex = clinical_patient$Sex[-c(1,2,3,4)],
+                  identity = gsub("-",".",clinical_patient$X.Patient.Identifier[-c(1,2,3,4)]))
+
+category = vector()
+knowns = vector()
+for(i in colnames(countData)){
+  for(j in temp$identity) 
+    if(grepl(j,i,fixed = TRUE)){
+    category = c(category, temp$sex[temp$identity==j])
+    knowns = c(knowns,i)
+    break
+  }
+}
+colData = data.frame(sex = category)
+rownames(colData)= knowns
+
+countData = countData[,knowns]
+
+#Running the differential expression pipeline
+dds = DESeqDataSetFromMatrix(countData=round(countData),
+                              colData=colData,
+                              design=~sex)
+dds = DESeq(dds)
+
+#Building the results table
+res <- results(dds)
+res = results(dds, contrast=c("sex", "Male", "Female"))
+mcols(res, use.names = TRUE)
+summary(res)
+
+# Variance stabilizing transformation
+vsd <- vst(dds)
+
+#PCA
+plotPCA(vsd,intgroup=c("sex"))
+
+#Filter by padj value and then log2FoldChange to find significant differentially expressed genes
+resSig <- subset(res, padj < 0.05)
+resSig_1 <- subset(resSig, log2FoldChange < -1 | log2FoldChange > 1)
+
+genes <- order(resSig_1$padj,decreasing = TRUE)
+
+#patient-gene heatmap
+annot_col = data.frame(colData$sex)
+row.names(annot_col) <- rownames(colData)
+
+sampleMatrix <- assay(vsd)[genes,]
+
+rownames(sampleMatrix) = rownames(countData[genes,])
+colnames(sampleMatrix) = colnames(countData)
+
+pheatmap(sampleMatrix , cluster_rows=FALSE, show_rownames=FALSE,
+         show_colnames=FALSE,clustering_method = "ward.D",
+         cluster_cols=TRUE, annotation_col=annot_col)
+```
+
+Analysis on patient features such as tumor stages
+```{r, warning=FALSE, message=FALSE}
+countData <- rna_seq
+
+#create conditions
+temp = data.frame(stage = clinical_patient$Neoplasm.Disease.Stage.American.Joint.Committee.on.Cancer.Code[-c(1,2,3,4)],
+                  identity = gsub("-",".",clinical_patient$X.Patient.Identifier[-c(1,2,3,4)]))
+
+category = vector()
+knowns = vector()
+for(i in colnames(countData)){
+  for(j in temp$identity) 
+    if(grepl(j,i,fixed = TRUE)){
+    category = c(category, temp$stage[temp$identity==j])
+    knowns = c(knowns,i)
+    break
+  }
+}
+colData = data.frame(stage = category)
+
+#Grouping Data
+colData[colData == "STAGE IIIA"] <- "STAGE III"
+colData[colData == "STAGE IIIB"] <- "STAGE III"
+colData[colData == "STAGE IIIC"] <- "STAGE III"
+colData[colData == "STAGE IVA"] <- "STAGE IV"
+colData[colData == "STAGE IVB"] <- "STAGE IV"
+
+rownames(colData)= knowns
+
+countData = countData[,knowns]
+
+#Running the differential expression pipeline
+dds = DESeqDataSetFromMatrix(countData=round(countData),
+                              colData=colData,
+                              design=~stage)
+dds = DESeq(dds)
+
+#Building the results table
+res <- results(dds)
+mcols(res, use.names = TRUE)
+summary(res)
+
+#Variance stabilizing transformation
+vsd <- vst(dds)
+
+#PCA
+plotPCA(vsd,intgroup=c("stage"))
+
+#Filter by padj value and then log2FoldChange to find significant differentially expressed genes
+resSig <- subset(res, padj < 0.05)
+resSig_1 <- subset(resSig, log2FoldChange < -1 | log2FoldChange > 1)
+
+genes <- order(resSig_1$padj,decreasing = TRUE)
+
+#patient-gene heatmap
+annot_col = data.frame(colData$stage)
+row.names(annot_col) <- rownames(colData)
+
+sampleMatrix <- assay(vsd)[genes,]
+
+rownames(sampleMatrix) = rownames(countData[genes,])
+colnames(sampleMatrix) = colnames(countData)
+
+pheatmap(sampleMatrix , cluster_rows=FALSE, show_rownames=FALSE,
+         show_colnames=FALSE,clustering_method = "ward.D",
+         cluster_cols=TRUE, annotation_col=annot_col)
+```
+
+Expression data analysis
+```{r, warning=FALSE, message=FALSE}
+#get variance of each expression:
+Expression_variance = data.frame(Expressions = rownames(RNAseq))
+Expression_variance$variance = rowSds(as.matrix(RNAseq))
+Expression_variance = Expression_variance[order(Expression_variance$variance, decreasing=TRUE),]
+
+#Take the top 500 expressions in terms of variance, then do PCA analysis:
+Top_500 = Expression_variance$Expressions[1:500]
+Culled_RNA = scale(t(RNAseq[Top_500,]))
+C.RNA.pca = prcomp(Culled_RNA, center = TRUE, scale. = TRUE)
+
+#Choose the PC's that add up to 90% of the variance:
+totvar = 0
+PCcount = 0 #This is the number of PCs to use in clustering
+while (totvar < 0.9){
+  PCcount = PCcount + 1
+  totvar = totvar + summary(C.RNA.pca)$importance[2,PCcount]
+}
+```
+
+```{r, warning=FALSE, message=FALSE}
+#Create clusters based on that PC's that show 90% of variance
+distmat = dist(C.RNA.pca$x[,1:PCcount], method = 'euclidean')
+hclust_ward = hclust(distmat, method = 'ward.D')
+plot(hclust_ward, labels = FALSE)
+rect.hclust(hclust_ward, k = 4, border = 2:6)
+
+fourclust = cutree(hclust_ward, k = 4)
+colData1 = data.frame(cluster = fourclust)
+colData1$cluster <- sapply(colData1$cluster, as.character)
+
+dds = DESeqDataSetFromMatrix(countData = RNAseq,
+                             colData=colData1,
+                             design=~cluster)
+
+dds = DESeq(dds)
+res = results(dds)
+```
+
+```{r, warning=FALSE, message=FALSE}
+#Get only the significant and differentially expressed genes
+res_sig = subset(res, padj < 0.05)
+res_sig = subset(res_sig, log2FoldChange < -1 | log2FoldChange > 1)
+res_sig = res_sig[order(res_sig$log2FoldChange, decreasing = TRUE), ]
+```
+
+```{r, warning=FALSE, message=FALSE}
+#Variance stabilizing transformation
+RNAseq2.0 = RNAseq[rownames(res_sig),]
+vsd1 <- vst(dds)
+
+#Patient-gene heatmap
+annot_col = data.frame(colData1$cluster)
+row.names(annot_col) <- rownames(colData1)
+
+sampleMatrix <- assay(vsd1)[rownames(res_sig),]
+
+rownames(sampleMatrix) = rownames(RNAseq2.0)
+colnames(sampleMatrix) = colnames(RNAseq2.0)
+
+pheatmap(sampleMatrix , cluster_rows=FALSE, show_rownames=TRUE, show_colnames = FALSE,
+         cluster_cols=TRUE, clustering_method = "ward.D", annotation_col=annot_col)
+```
+
+```{r, warning=FALSE, message=FALSE}
+#PCA plot
+pcaData <- plotPCA(vsd1, intgroup=c("cluster"), returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color=cluster)) + 
+  geom_point(size=3) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed()
+```
+
+```{r, warning=FALSE, message=FALSE}
+#Pathway analysis on the patient cluster DE genes
+tmp=gsub("\\..*","",row.names(res))
+res$entrez = mapIds(org.Hs.eg.db,
+                    keys=tmp, 
+                    column="ENTREZID",
+                    keytype="ENSEMBL",
+                    multiVals="first")
+data(kegg.sets.hs)
+data(sigmet.idx.hs)
+
+# Focus on signaling and metabolic pathways only
+kegg.sets.hs = kegg.sets.hs[sigmet.idx.hs]
+
+#Look at all significant genes/pathways - padj < 0.06
+#We were getting trouble with GAGE when trying to get pathways with padj < 0.05 so we used 0.06 instead
+res = subset(res, padj < 0.06)
+foldchanges = res$log2FoldChange
+names(foldchanges) = res$entrez
+foldchanges <- foldchanges[!is.na(names(foldchanges))]
+head(foldchanges)
+keggres = gage(foldchanges, gsets=kegg.sets.hs)
+
+## Focus on top upregulated and downregulated pathways
+keggrespathwaysup <- rownames(keggres$greater)[1] #change to [1:5] to look at top 5 pathways
+keggrespathwaysdown <- rownames(keggres$less)[1]
+
+# Extract the 8 character long IDs part of each string
+keggresidsup = substr(keggrespathwaysup, start=1, stop=8)
+keggresidsdown = substr(keggrespathwaysdown, start=1, stop=8)
+pathview(gene.data=foldchanges, pathway.id=keggresidsup, species="hsa")
+pathview(gene.data=foldchanges, pathway.id=keggresidsdown, species="hsa")
+```
+
+```{r, warning=FALSE, message=FALSE}
+#Survival analysis on the patient clusters
+clin_df = clinical_patient[, 
+                           c("X.Patient.Identifier",
+                             "Overall.Survival.Status",
+                             "Overall.Survival..Months.")]
+clin_df = clin_df[-c(1,2,3,4),]
+Overall_survival = c()
+survival_months = c()
+
+#Possible affected groups
+age = c()
+race = c()
+sex = c()
+stage = c()
+for (i in rownames(colData1)){
+  index = which(gsub("-",".",clin_df$X.Patient.Identifier) == substr(i,1,12))
+  Overall_survival = c(Overall_survival, clin_df$Overall.Survival.Status[index])
+  survival_months = c(survival_months, clin_df$Overall.Survival..Months.[index])
+  sex = c(sex, clinical_patient$Sex[index+4])
+  race = c(race, clinical_patient$Race.Category[index+4])
+  age = c(age, clinical_patient$Diagnosis.Age[index+4])
+  stage = c(stage, clinical_patient$Neoplasm.Disease.Stage.American.Joint.Committee.on.Cancer.Code[index+4])
+}
+
+colData1$Overall.Survival.Status = Overall_survival
+colData1$Overall.Survival..Months. = survival_months
+colData1$sex = sex
+colData1$age = age
+colData1$race = race
+colData1$stage = stage
+
+colData1$deceased = colData1$Overall.Survival.Status == "1:DECEASED"
+colData1$Overall.Survival..Months. <- as.numeric(colData1$Overall.Survival..Months.)
+fit = survfit(Surv(Overall.Survival..Months., deceased) ~ cluster, data=colData1)
+
+print(fit)
+ggsurvplot(fit, data=colData1, pval=T, risk.table=T, risk.table.height=0.35)
+```
+
+We wanted to look at potential clinical factors that affected cluster 3
+```{r, warning=FALSE, message=FALSE}
+table(colData1$sex[which(colData1$cluster==3)])
+table(colData1$age[which(colData1$cluster==3)])
+table(colData1$race[which(colData1$cluster==3)])
+table(colData1$stage[which(colData1$cluster==3)])
+#None seems promising so we wanted to look at mutation data
+```
+
+Creating confusion matrix based of presence of top 5 mutated and expressed genes in cluster 3
+```{r, warning=FALSE, message=FALSE}
+mutationgroup = rownames(colData1)[which(colData1$cluster==3)]
+mutations$cluster = ifelse(substr(gsub("-",".",mutations$Tumor_Sample_Barcode),1,12) 
+                           %in% substr(mutationgroup,1,12), "3","0")
+
+test = table(mutations$Hugo_Symbol[which(mutations$cluster == "3")])
+mostfrequent = order(test, decreasing = TRUE)[1:10]
+
+#ANKHD1 is one of the top 50 mutated gene and also one of the top 5 expressed gene in cluster 3
+hasmutation = substr(gsub("-",".",mutations$Tumor_Sample_Barcode[which(mutations$Hugo_Symbol == "ANKHD1")]),1,12)
+
+prediction = ifelse(colData1$cluster == 3,TRUE,FALSE)
+real = ifelse(substr(rownames(colData1),1,12) %in% hasmutation, TRUE, FALSE)
+
+table(prediction, real)
+#ANKHD1, a top mutated gene, has an accuracy of ~85% which shows that it is prevalent within cluster 3
+```
+
+Survival analysis on patient with mutation in ANKHD1 gene
+```{r, warning=FALSE, message=FALSE}
+#Only looking at patient with mutation in specific gene - ANKHD1 - found in cluster 3
+groupA <- substr(mutations$Tumor_Sample_Barcode[grep("ANKHD1",mutations$Hugo_Symbol)],1,12)
+
+clinical_patient$group <- ifelse(clinical_patient$X.Patient.Identifier %in% groupA, 
+                       "groupA", 
+                       ifelse(!(clinical_patient$X.Patient.Identifier %in% groupA), "groupB", NA))
+
+
+# we are only interested in the "With Tumor" cases for survival
+clin_df = clinical_patient[clinical_patient$Person.Neoplasm.Cancer.Status == "With Tumor", 
+                    c("X.Patient.Identifier",
+                      "Overall.Survival.Status",
+                      "Overall.Survival..Months.",
+                      "group")]
+
+# create a new boolean variable that has TRUE for dead patients
+# and FALSE for live patients
+clin_df$deceased = clin_df$Overall.Survival.Status == "1:DECEASED"
+
+# Overall survival months takes into account months_to_death 
+#for dead patients, and to months_to_last_follow_up for patients who
+# are still alive
+clin_df$Overall.Survival..Months. <- as.numeric(clin_df$Overall.Survival..Months.)
+
+
+# fit a survival model
+fit = survfit(Surv(Overall.Survival..Months., deceased) ~ group, data=clin_df) 
+
+print(fit)
+
+# we produce a Kaplan Meier plot
+ggsurvplot(fit, data=clin_df, pval=T, risk.table=T, risk.table.height=0.35)
+```
+
+Mutation Data Analysis - Looking more closely at mutation data
+```{r, warning=FALSE, message=FALSE}
+#Gene patient matrix
+rownames = unique(mutations$Hugo_Symbol)
+colnames = clinical_patient$X.Patient.Identifier[-c(1,2,3,4)]
+
+patient_gene = matrix(0, nrow = length(rownames), ncol = length(colnames))
+rownames(patient_gene) = rownames
+colnames(patient_gene) = colnames
+
+for(i in colnames){
+  a = mutations$Hugo_Symbol[which(grepl(i,mutations$Tumor_Sample_Barcode))]
+  for (j in a){patient_gene[j,i] = 1}
+}
+```
+
+```{r, warning=FALSE, message=FALSE}
+#Top 20 mutated gene and their number of occurrences
+patient_gene <- cbind(patient_gene, count = rowSums(patient_gene))
+patient_gene = patient_gene[order(patient_gene[,373],decreasing=TRUE),]
+patient_gene[1:20,373]
+```
+
+```{r, warning=FALSE, message=FALSE}
+#Modify rna_seq so it only includes patients with mutation in one of the top 50 mutated gene
+PatientID <- c()
+genes <-rownames(patient_gene)
+
+for (i in 1:50){
+  tmp <- mutations$Tumor_Sample_Barcode[which(mutations$Hugo_Symbol == genes[i])]
+  tmp <- gsub("\\-", ".", tmp)
+  PatientID <- append(PatientID,tmp)
+}
+PatientID <- unique(PatientID)
+
+rna_seq_mod <- rna_seq
+rna_seq_mod <- rna_seq_mod[ , (substr(names(rna_seq_mod),1,15) %in% PatientID)]
+```
+
+```{r, warning=FALSE, message=FALSE}
+#DEseq on patient groups based on w/t vs w/out mutation in particular genes
+countData <- rna_seq
+
+patient <- colnames(countData)
+colData <- data.frame(patient) 
+
+groupA <- colnames(rna_seq_mod) #patient with mutated gene (top 50)
+
+colData$group <- ifelse(colData$patient %in% groupA, 
+                       "groupA", 
+                       ifelse(!(colData$patient %in% groupA), "groupB", NA))
+
+rownames(colData) <- colData$patient
+
+#Running the differential expression pipeline
+dds = DESeqDataSetFromMatrix(countData=round(countData ),
+                              colData=colData,
+                              design=~group)
+dds = DESeq(dds)
+
+#Building the results table
+res <- results(dds)
+res = results(dds, contrast=c("group", "groupA", "groupB"))
+mcols(res, use.names = TRUE)
+summary(res)
+```
+
+```{r, warning=FALSE, message=FALSE}
+#Variance stabilizing transformation
+vsd <- vst(dds)
+
+#PCA
+plotPCA(vsd,intgroup=c("group"))
+
+#Significant and differentially expressed genes
+resSig <- subset(res, padj < 0.05)
+resSig_1 <- subset(resSig, log2FoldChange < -1 | log2FoldChange > 1)
+
+genes <- order(resSig_1$padj,decreasing = TRUE)
+
+#Patient-gene heatmap
+annot_col = data.frame(colData$group)
+row.names(annot_col) <- rownames(colData)
+
+sampleMatrix <- assay(vsd)[genes,]
+
+rownames(sampleMatrix) = rownames(countData[genes,])
+colnames(sampleMatrix) = colnames(countData)
+
+pheatmap(sampleMatrix , cluster_rows=TRUE, show_rownames=FALSE,
+         show_colnames = FALSE, clustering_method = "ward.D",
+         cluster_cols=TRUE, annotation_col=annot_col)
+```
+
+```{r, warning=FALSE, message=FALSE}
+#Find the gene names of the top significant and differentially expressed genes
+library("AnnotationDbi")
+library("org.Hs.eg.db")
+
+ensembl_id = as.vector(rownames(sampleMatrix))
+ensembl_id <- substr(ensembl_id, start=1, stop=15)
+
+gene_name <- select(org.Hs.eg.db, keys=ensembl_id, 
+                columns="SYMBOL", keytype="ENSEMBL")
+head(gene_name)
+```
+
+```{r, warning=FALSE, message=FALSE}
+#Pathway analysis on the patient cluster DE genes
+tmp=gsub("\\..*","",row.names(res))
+res$entrez = mapIds(org.Hs.eg.db,
+                    keys=tmp, 
+                    column="ENTREZID",
+                    keytype="ENSEMBL",
+                    multiVals="first")
+data(kegg.sets.hs)
+data(sigmet.idx.hs)
+
+# Focus on signaling and metabolic pathways only
+kegg.sets.hs = kegg.sets.hs[sigmet.idx.hs]
+
+#Look at all significant genes/pathways - padj < 0.06
+#We were getting trouble with GAGE when trying to get pathways with padj < 0.05 so we used 0.06 instead
+res = subset(res, padj < 0.06)
+foldchanges = res$log2FoldChange
+names(foldchanges) = res$entrez
+foldchanges <- foldchanges[!is.na(names(foldchanges))]
+head(foldchanges)
+keggres = gage(foldchanges, gsets=kegg.sets.hs)
+
+## Focus on top upregulated and downregulated pathways
+keggrespathwaysup <- rownames(keggres$greater)[1] #change to [1:5] to look at top 5 pathways
+keggrespathwaysdown <- rownames(keggres$less)[1]
+
+# Extract the 8 character long IDs part of each string
+keggresidsup = substr(keggrespathwaysup, start=1, stop=8)
+keggresidsdown = substr(keggrespathwaysdown, start=1, stop=8)
+pathview(gene.data=foldchanges, pathway.id=keggresidsup, species="hsa")
+pathview(gene.data=foldchanges, pathway.id=keggresidsdown, species="hsa")
+```
+
+Comparing expression with mutation analysis data
+<br>
+Notice that patient cluster 3 from expression data analysis have some overlaps with the non-mutated patient cluster (group B) from mutation data analysis
+```{r, warning=FALSE, message=FALSE}
+#PCA plot for expression analysis
+plotPCA(vsd1,intgroup=c("cluster"))
+
+#PCA plot for mutation analysis where group B is the non-mutated patient cluster
+plotPCA(vsd,intgroup=c("group"))
+```
+
+Chekc to see if survival rates of group B is similar to cluster 3
+```{r, warning=FALSE, message=FALSE}
+#Survival Analysis - Patients with mutation in one of the top 50 mutated gene vs without
+patient <- substr(colData$patient,1,12)
+patient <- gsub("\\.", "-", patient)
+
+groupA <- patient[grep("groupA",colData$group)] #patient with mutated gene (top 50)
+groupB <- patient[grep("groupB",colData$group)] #patient without mutated gene
+
+clinical_patient$group <- ifelse(clinical_patient$X.Patient.Identifier %in% groupA, 
+                       "groupA", 
+                       ifelse(clinical_patient$X.Patient.Identifier %in% groupB, "groupB", NA))
+
+
+# we are only interested in the "With Tumor" cases for survival
+clin_df = clinical_patient[clinical_patient$Person.Neoplasm.Cancer.Status == "With Tumor", 
+                    c("X.Patient.Identifier",
+                      "Overall.Survival.Status",
+                      "Overall.Survival..Months.",
+                      "group")]
+
+# create a new boolean variable that has TRUE for dead patients
+# and FALSE for live patients
+clin_df$deceased = clin_df$Overall.Survival.Status == "1:DECEASED"
+
+# Overall survival months takes into account months_to_death 
+#for dead patients, and to months_to_last_follow_up for patients who
+# are still alive
+clin_df$Overall.Survival..Months. <- as.numeric(clin_df$Overall.Survival..Months.)
+
+# fit a survival model
+fit = survfit(Surv(Overall.Survival..Months., deceased) ~ group, data=clin_df)
+
+print(fit) 
+
+# we produce a Kaplan Meier plot
+ggsurvplot(fit, data=clin_df, pval=T, risk.table=T, risk.table.height=0.35)
+```
+It seems that cluster 3 and Group B may be in some way related, as their clustering is very similar. However, this does not mean that cluster 3 is group B as shown by the discrepancy in their survival analysis results. 
